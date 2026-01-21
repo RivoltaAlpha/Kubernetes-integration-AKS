@@ -1,438 +1,578 @@
-# Jenkins CI/CD Pipeline Setup Guide
+# Azure AKS Production Deployment Guide
+
+## 📋 Table of Contents
+1. [Overview](#overview)
+2. [Prerequisites](#prerequisites)
+3. [Infrastructure Setup with Terraform](#infrastructure-setup-with-terraform)
+4. [Configure Jenkins for AKS Deployment](#configure-jenkins-for-aks-deployment)
+5. [Deploy Application](#deploy-application)
+6. [Monitoring and Observability](#monitoring-and-observability)
+7. [Rollback Procedures](#rollback-procedures)
+8. [Troubleshooting](#troubleshooting)
+
+---
 
 ## Overview
-This guide walks you through setting up a complete Jenkins Multibranch Pipeline with branch-specific build rules, security scanning, and container registry integration.
 
-## Pipeline Requirements
+This guide walks you through deploying your microservice application to **Azure Kubernetes Service (AKS)** with:
 
-### Branch-Specific Rules
-- **develop**: Build + Test + Static Analysis (no registry push)
-- **test**: Build + Test + Static Analysis + Security Scans + Push to Registry
-- **prod**: Build + Test + Static Analysis + Security Scans + Push with Release Tags
+- ✅ **Terraform** for infrastructure as code
+- ✅ **Production-ready configurations** (autoscaling, health checks, security)
+- ✅ **Azure Monitor & Application Insights** for observability
+- ✅ **Automated rollback** on deployment failures
+- ✅ **Helm charts** for deployment management
 
-## Quick Start
+---
 
-### Step 1: Start the Infrastructure
+## Prerequisites
+
+### Required Tools
 ```bash
-# Start all services
-docker-compose up -d
+# Install Azure CLI
+curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
 
-# Wait for Jenkins to be ready (takes ~2 minutes)
-docker logs -f jenkins
-# Wait for: "Jenkins is fully up and running"
+# Install kubectl
+az aks install-cli
+
+# Install Helm 3
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# Install Terraform
+wget https://releases.hashicorp.com/terraform/1.6.0/terraform_1.6.0_linux_amd64.zip
+unzip terraform_1.6.0_linux_amd64.zip
+sudo mv terraform /usr/local/bin/
 ```
 
-### Step 2: Access Jenkins
-1. Open: http://localhost:8080
-2. Login credentials:
-   - **Username**: `admin`
-   - **Password**: `admin123`
+### Azure Account Setup
+1. **Azure Subscription** with appropriate permissions
+2. **Service Principal** for automation
+3. **Resource Group** access
 
-### Step 3: Create Branches
+---
 
-```bash
-# Create develop branch
-git checkout -b develop
-git push origin develop
+## Infrastructure Setup with Terraform
 
-# Create test branch
-git checkout -b test
-git push origin test
-
-# Create prod branch
-git checkout -b prod
-git push origin prod
-
-# Return to master
-git checkout master
-```
-
-### Step 4: Setup GitHub Repository (Optional)
-
-If using GitHub:
-```bash
-# Add remote
-git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO.git
-
-# Push all branches
-git push -u origin master develop test prod
-```
-
-### Step 5: Create Jenkins Multibranch Pipeline Via Jenkins UI 
-
-1. Click **"New Item"** in Jenkins
-2. Enter name: `microservice-pipeline`
-3. Select **"Multibranch Pipeline"**
-4. Click **OK**
-
-5. **Branch Sources** section:
-   - Click **"Add source"** → **"Git"**
-   - **Project Repository**: 
-     - For local: `/var/jenkins_home/workspace` (auto-detected)
-     - For GitHub: `https://github.com/YOUR_USERNAME/YOUR_REPO.git`
-   
-6. **Build Configuration**:
-   - **Mode**: by Jenkinsfile
-   - **Script Path**: `Jenkinsfile`
-
-7. **Scan Multibranch Pipeline Triggers**:
-   - ✅ Check **"Periodically if not otherwise run"**
-   - **Interval**: 1 minute (for testing) or 5 minutes (production)
-
-8. Click **"Save"**
-
-9. Click **"Scan Repository Now"** to discover branches
-
-## Credentials Setup
-
-The init.groovy script automatically creates these credentials:
-
-### 1. Docker Registry Credentials
-- **ID**: `docker-registry-credentials`
-- **Type**: Username with password
-- **Username**: `admin`
-- **Password**: `admin`
-- **Usage**: Authenticating to local Docker registry
-
-### 2. SonarQube Token
-- **ID**: `sonarqube-token`
-- **Type**: Secret text
-- **Value**: Auto-generated SonarQube token
-- **Usage**: Static code analysis
-
-Go to Sysyem -> SonarQUbe servers
-Add SonarQUbe then select the Auto-generated SonarQube token
-
-### 3. NVD API Key (Optional but HIGHLY Recommended)
-- **ID**: `nvd-api-key`
-- **Type**: Secret text
-- **Value**: Your NVD API key
-- **Usage**: Speeds up OWASP Dependency Check (from 30+ min to <2 min)
-
-**To get an NVD API key:**
-1. Go to https://nvd.nist.gov/developers/request-an-api-key
-2. Fill out the form and submit
-3. You'll receive an API key via email instantly
-4. Add it to Jenkins:
-   - **Manage Jenkins** → **Credentials** → **System** → **Global credentials**
-   - **Add Credentials** → **Secret text**
-   - Paste your API key
-   - ID: **nvd-api-key**
-   - Click **Create**
-
-**Without NVD API key**: The OWASP scan will use `--noupdate` flag (faster but may miss recent vulnerabilities)
-
-### Manual Credential Update (if needed):
-1. Go to **Manage Jenkins** → **Credentials**
-2. Click **"(global)"** domain
-3. Click on credential ID
-4. Click **"Update"**
-5. Enter new values
-6. Click **"Save"**
-
-## Understanding the Pipeline
-
-### Pipeline Stages Overview
-
-``` bash
-┌─────────────┐
-│ Push Code   │  Any Branch
-└──────┬──────┘
-       │
-┌──────▼──────┐
-│    Build    │  All Branches will do this
-└──────┬──────┘
-       │
-┌──────▼──────┐
-│  Run Tests  │  All Branches will do this
-└──────┬──────┘
-       │
-┌──────▼──────────┐
-│ Static Analysis │  All Branches will do this
-└──────┬──────────┘
-       │
-       ├─── develop: STOP HERE ───┐
-       │                          │
-       │  test/prod: Continue     │
-       │                          │
-┌──────▼────────────┐             │
-│ Security Scanning │             │
-│  - Dependency     │             │
-│  - Container      │             │
-└──────┬────────────┘             │
-       │                          │
-┌──────▼──────────┐               │
-│  Build Image    │               │
-└──────┬──────────┘               │
-       │                          │
-┌──────▼──────────┐               │
-│  Push Registry  │               │
-└──────┬──────────┘               │
-       │                          │
-┌──────▼──────────┐               │
-│ Deploy Info     │               │
-└─────────────────┘               │
-                                  │
-                           ┌──────▼──────┐
-                           │   Success   │
-                           └─────────────┘
-```
-
-### Branch-Specific Behavior
-
-#### Develop Branch
+### Step 1: Configure Azure Backend for Terraform State
 
 ```bash
-✓ Checkout
-✓ Build Application
-✓ Run Tests
-✓ Static Code Analysis
-✗ Security Scanning (skipped)
-✗ Build Docker Image (skipped)
-✗ Push to Registry (skipped)
+# Create resource group for Terraform state
+az group create --name tfstate-rg --location eastus
+
+# Create storage account for state files
+az storage account create \
+  --name tfstatemicroserviceapp \
+  --resource-group tfstate-rg \
+  --location eastus \
+  --sku Standard_LRS
+
+# Create storage container
+az storage container create \
+  --name tfstate \
+  --account-name tfstatemicroserviceapp
 ```
 
-#### Test Branch
+### Step 2: Initialize Terraform
 
 ```bash
-✓ Checkout
-✓ Build Application
-✓ Run Tests
-✓ Static Code Analysis
-✓ Security Scanning (OWASP + Trivy)
-✓ Build Docker Image (tag: test-{BUILD_NUMBER})
-✓ Push to Registry
+cd terraform
+
+# Initialize Terraform
+terraform init
+
+# Review the execution plan
+terraform plan -out=tfplan
+
+# Apply the configuration
+terraform apply tfplan
 ```
 
-#### Prod Branch
+### Step 3: Verify Infrastructure
 
 ```bash
-✓ Checkout
-✓ Build Application
-✓ Run Tests
-✓ Static Code Analysis
-✓ Quality Gate (must pass)
-✓ Security Scanning (OWASP + Trivy, fail on HIGH/CRITICAL)
-✓ Build Docker Image (tag: prod-{VERSION})
-✓ Push to Registry (with 'latest' tag)
+# Get AKS credentials
+az aks get-credentials \
+  --resource-group microservice-app-prod-rg \
+  --name microservice-app-aks
+
+# Verify cluster access
+kubectl get nodes
+kubectl get namespaces
 ```
 
-## 🧪 Testing the Pipeline
+### What Terraform Creates
 
-### Test Develop Branch
+| Resource | Purpose |
+|----------|---------|
+| **AKS Cluster** | Kubernetes cluster with 3-10 auto-scaling nodes |
+| **Azure Container Registry (ACR)** | Private container registry with geo-replication |
+| **Log Analytics Workspace** | Centralized logging for all AKS resources |
+| **Application Insights** | Application performance monitoring |
+| **Azure Monitor Workspace** | Managed Prometheus metrics |
+| **Virtual Network** | Isolated network for AKS |
+| **Monitoring Alerts** | CPU, memory, and pod failure alerts |
+
+---
+
+## Configure Jenkins for AKS Deployment
+
+### Step 1: Create Azure Service Principal
 
 ```bash
-git checkout develop
+# Create service principal
+az ad sp create-for-rbac \
+  --name "jenkins-aks-deployer" \
+  --role contributor \
+  --scopes /subscriptions/<YOUR_SUBSCRIPTION_ID>
 
-# Make a change
->> app/src/index.ts
-
-git add .
-git commit -m "test: develop branch pipeline"
-git push origin develop
+# Output will contain:
+# {
+#   "appId": "<CLIENT_ID>",
+#   "password": "<CLIENT_SECRET>",
+#   "tenant": "<TENANT_ID>"
+# }
 ```
 
-**Expected**: Build, test, and static analysis only. No image push.
+### Step 2: Add Credentials to Jenkins
 
-### Test Test Branch
+Navigate to **Jenkins → Manage Jenkins → Credentials → Global → Add Credentials**
+
+1. **Azure Service Principal**
+   - Type: `Username with password`
+   - ID: `azure-service-principal`
+   - Username: `<CLIENT_ID from above>`
+   - Password: `<CLIENT_SECRET from above>`
+
+2. **Azure Tenant ID**
+   - Type: `Secret text`
+   - ID: `azure-tenant-id`
+   - Secret: `<TENANT_ID from above>`
+
+3. **Azure Subscription ID**
+   - Type: `Secret text`
+   - ID: `azure-subscription-id`
+   - Secret: `<YOUR_SUBSCRIPTION_ID>`
+
+### Step 3: Install Required Jenkins Plugins
+
+Install these plugins via **Manage Jenkins → Plugin Manager**:
+- Azure Credentials
+- Kubernetes CLI
+- Pipeline
+
+### Step 4: Install Azure CLI and Helm in Jenkins Container
 
 ```bash
-git checkout test
-git merge develop
+# Exec into Jenkins container
+docker exec -it jenkins bash
 
-git push origin test
+# Install Azure CLI
+curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+
+# Install kubectl
+az aks install-cli
+
+# Install Helm
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# Verify installations
+az --version
+kubectl version --client
+helm version
 ```
 
-**Expected**: Full pipeline with security scans and registry push with tag `test-{BUILD_NUMBER}`
+---
 
-### Test Prod Branch
+## Deploy Application
+
+### Option 1: Deploy via Jenkins Pipeline (Recommended)
+
+1. **Push to `prod` branch**:
+   ```bash
+   git checkout prod
+   git merge main
+   git push origin prod
+   ```
+
+2. **Jenkins will automatically**:
+   - Build application
+   - Run tests and security scans
+   - Build Docker image
+   - Push to Azure Container Registry
+   - Deploy to AKS using Helm
+   - Run smoke tests
+   - Auto-rollback on failure
+
+### Option 2: Manual Deployment via Helm
 
 ```bash
-git checkout prod
+# Get AKS credentials
+az aks get-credentials \
+  --resource-group microservice-app-prod-rg \
+  --name microservice-app-aks
 
-# Update version in package.json
-cd app
-npm version patch  # or minor, major
+# Install Application Insights secret
+INSTRUMENTATION_KEY=$(az monitor app-insights component show \
+  --app microservice-app-insights \
+  --resource-group microservice-app-prod-rg \
+  --query instrumentationKey -o tsv)
 
-cd ..
-git add .
-git commit -m "chore: bump version for release"
-git push origin prod
+kubectl create secret generic app-insights-key \
+  --namespace=production \
+  --from-literal=instrumentationKey="$INSTRUMENTATION_KEY"
+
+# Deploy with Helm
+helm upgrade microservice-app ./helm/microservice-app \
+  --install \
+  --namespace production \
+  --create-namespace \
+  --set image.repository=microserviceappacr.azurecr.io/microservice-app \
+  --set image.tag=prod-1.0.0 \
+  --wait \
+  --timeout 5m
 ```
 
-**Expected**: Full pipeline with quality gate + security scans + registry push with version tag and 'latest'
-
-## 🔍 Viewing Build Results
-
-### 1. Console Output
-
-- Click on build number
-- Click **"Console Output"**
-- See real-time logs
-
-### 2. Test Results
-
-- Click on build
-- Click **"Test Result"**
-- View JUnit test reports
-
-### 3. Code Coverage
-
-- Click on build
-- Click **"Coverage Report"**
-- View Istanbul/NYC coverage
-
-### 4. Security Reports
-
-- Click on build
-- Click **"OWASP Dependency Check"**
-- Download **"Trivy Report"** from artifacts
-
-### 5. SonarQube Analysis
-
-- Open: http://localhost:9000
-- Login: `admin` / `admin`
-- View project: `microservice-app`
-
-## 🐳 Verifying Registry Images
-
-### List Images in Registry
+### Option 3: Manual Deployment via Kubectl
 
 ```bash
+# Apply Kubernetes manifests
+kubectl apply -f k8s/production/namespace.yaml
+kubectl apply -f k8s/production/configmap.yaml
+kubectl apply -f k8s/production/rbac.yaml
+kubectl apply -f k8s/production/deployment.yaml
+kubectl apply -f k8s/production/service.yaml
+kubectl apply -f k8s/production/hpa.yaml
+kubectl apply -f k8s/production/pdb.yaml
 
-# Check registry catalog
-curl http://localhost:5000/v2/_catalog
-
-# Check specific image tags
-curl http://localhost:5000/v2/microservice-app/tags/list
+# Check deployment status
+kubectl rollout status deployment/microservice-app -n production
 ```
 
-### Pull and Run Image
+---
+
+## Monitoring and Observability
+
+### Azure Monitor Container Insights
+
+**Access**: Azure Portal → AKS Cluster → Monitoring → Insights
+
+**Key Metrics**:
+- Node CPU/Memory utilization
+- Pod status and restarts
+- Container logs
+- Resource consumption
+
+### Application Insights
+
+**Access**: Azure Portal → Application Insights → microservice-app-insights
+
+**Features**:
+- Request rates and response times
+- Failed requests
+- Dependencies
+- Live metrics
+- Distributed tracing
+
+### Custom Queries in Log Analytics
+
+```kusto
+// Failed pods in last 24 hours
+KubePodInventory
+| where TimeGenerated > ago(24h)
+| where PodStatus == "Failed"
+| project TimeGenerated, Namespace, Name, PodStatus
+
+// Container restarts
+KubePodInventory
+| where RestartCount > 0
+| summarize RestartCount=max(RestartCount) by Name, Namespace
+| order by RestartCount desc
+
+// Application errors
+ContainerLog
+| where LogEntry contains "error" or LogEntry contains "Error"
+| where Namespace == "production"
+| project TimeGenerated, ContainerID, LogEntry
+| take 100
+```
+
+### Access Application Logs
 
 ```bash
-# Test branch image
-docker pull registry:5000/microservice-app:test-1
+# View logs from all pods
+kubectl logs -n production -l app=microservice-app --tail=100
 
-# Prod branch image
-docker pull registry:5000/microservice-app:latest
+# Stream logs in real-time
+kubectl logs -n production -l app=microservice-app -f
 
-# Run container
-docker run -p 3000:3000 registry:5000/microservice-app:latest
+# View specific pod logs
+kubectl logs -n production <POD_NAME>
+
+# View previous container logs (if pod crashed)
+kubectl logs -n production <POD_NAME> --previous
 ```
-
-## 📈 Monitoring
 
 ### Prometheus Metrics
 
-- Jenkins: http://localhost:8080/prometheus/
-- Prometheus UI: http://localhost:9090
-- Example queries:
-  - Total builds: `default_jenkins_builds_total_build_count_total`
-  - Success rate: `default_jenkins_builds_success_build_count_total`
-  - Failed builds: `default_jenkins_builds_failed_build_count_total`
-  - Build duration: `default_jenkins_builds_duration_milliseconds_summary`
+Metrics are automatically collected by Azure Monitor Managed Prometheus.
 
-### Grafana Dashboards
+**Access**: Azure Portal → Monitor → Workspaces → microservice-app-prometheus
 
-- URL: http://localhost:3000
-- Login: `admin` / `admin123`
-- Dashboard: "Jenkins Performance"
+**Key Metrics**:
+- `container_cpu_usage_seconds_total`
+- `container_memory_working_set_bytes`
+- `kube_pod_status_phase`
+- Custom application metrics from `/metrics` endpoint
 
-## 🛠️ Troubleshooting
+### Setup Monitoring Script
 
-### Issue: Pipeline doesn't trigger
+Run the provided script to configure monitoring:
 
-**Solution**: 
 ```bash
-# Manually trigger scan
-# In Jenkins UI: Click "Scan Repository Now"
+chmod +x scripts/setup-monitoring.sh
+export RESOURCE_GROUP="microservice-app-prod-rg"
+export CLUSTER_NAME="microservice-app-aks"
+./scripts/setup-monitoring.sh
 ```
 
-### Issue: SonarQube connection fails
-**Solution**:
+---
+
+## Rollback Procedures
+
+### Automatic Rollback
+
+The Jenkins pipeline includes **automatic rollback** on deployment failure using Helm's `--atomic` flag.
+
+If deployment fails:
+1. Helm automatically rolls back to the previous working revision
+2. Jenkins logs show rollback status
+3. Previous version continues serving traffic
+
+### Manual Rollback via Helm
+
 ```bash
-# Check SonarQube is running
-docker ps | grep sonarqube
+# View deployment history
+helm history microservice-app -n production
 
-# Check SonarQube logs
-docker logs sonarqube
+# Rollback to previous revision
+helm rollback microservice-app -n production
 
-# Regenerate token
-docker exec -it jenkins cat /var/jenkins_home/credentials.xml
+# Rollback to specific revision
+helm rollback microservice-app 3 -n production
+
+# Verify rollback
+kubectl get pods -n production -l app=microservice-app
 ```
 
-### Issue: Docker registry push fails
-**Solution**:
+### Manual Rollback via Kubectl
+
 ```bash
-# Check registry is running
-docker ps | grep registry
+# View deployment history
+kubectl rollout history deployment/microservice-app -n production
 
-# Test registry manually
-curl http://localhost:5000/v2/
+# Rollback to previous version
+kubectl rollout undo deployment/microservice-app -n production
 
-# Check Jenkins has Docker socket access
-docker exec -it jenkins docker ps
+# Rollback to specific revision
+kubectl rollout undo deployment/microservice-app -n production --to-revision=3
+
+# Monitor rollback progress
+kubectl rollout status deployment/microservice-app -n production
 ```
 
-### Issue: Git credentials in Jenkins
-**Solution**:
+### Using Rollback Script
+
 ```bash
-# For private repos, add GitHub credentials
-# Manage Jenkins → Credentials → Add Credentials
-# Kind: Username with password
-# Username: your-github-username
-# Password: your-github-personal-access-token
+chmod +x scripts/rollback.sh
+
+# Rollback to previous version
+export NAMESPACE="production"
+export RELEASE_NAME="microservice-app"
+./scripts/rollback.sh
+
+# Rollback to specific revision
+export REVISION=3
+./scripts/rollback.sh
 ```
 
-## 🔒 Security Best Practices
+### Rollback Verification
 
-### ✅ Current Security Measures
-- ✓ No secrets in repository
-- ✓ Credentials stored in Jenkins credential store
-- ✓ Registry authentication required
-- ✓ OWASP dependency scanning
-- ✓ Container vulnerability scanning (Trivy)
-- ✓ SonarQube code quality checks
+After rollback, verify:
 
-### 🔄 Recommended Improvements
-- [ ] Use HashiCorp Vault for secrets
-- [ ] Enable HTTPS on registry
-- [ ] Implement image signing
-- [ ] Add SAST scanning (Snyk, Checkmarx)
-- [ ] Enable branch protection rules
-- [ ] Implement approval gates for prod
+```bash
+# Check pod status
+kubectl get pods -n production -l app=microservice-app
 
-## 📚 Additional Resources
+# Check deployment revision
+helm list -n production
+kubectl rollout history deployment/microservice-app -n production
 
-### Jenkins Documentation
-- [Multibranch Pipeline](https://www.jenkins.io/doc/book/pipeline/multibranch/)
-- [Credentials Plugin](https://plugins.jenkins.io/credentials/)
-- [Docker Pipeline Plugin](https://plugins.jenkins.io/docker-workflow/)
+# Test health endpoint
+EXTERNAL_IP=$(kubectl get svc microservice-app -n production -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+curl http://$EXTERNAL_IP/health
+```
 
-### Tool Documentation
-- [SonarQube](https://docs.sonarqube.org/)
-- [OWASP Dependency Check](https://owasp.org/www-project-dependency-check/)
-- [Trivy](https://aquasecurity.github.io/trivy/)
+---
 
-## 🎓 Next Steps
+## Troubleshooting
 
-1. ✅ Start infrastructure
-2. ✅ Access Jenkins (http://localhost:8080)
-3. ✅ Create multibranch pipeline
-4. ✅ Create and push branches (develop, test, prod)
-5. ✅ Trigger builds on each branch
-6. ✅ Verify images in registry
-7. ✅ Check monitoring dashboards
+### Pods Not Starting
 
-## 📝 Summary
+```bash
+# Describe pod to see events
+kubectl describe pod <POD_NAME> -n production
 
-Your Jenkins CI/CD pipeline is now configured with:
-- ✓ Automated multibranch pipeline
-- ✓ Branch-specific build rules
-- ✓ Secure credential management
-- ✓ Comprehensive security scanning
-- ✓ Container registry integration
-- ✓ Quality gates for production
-- ✓ Full monitoring and reporting
+# Check pod logs
+kubectl logs <POD_NAME> -n production
 
-**Ready to deliver! 🚀**
+# Check if image can be pulled
+kubectl get events -n production --sort-by='.lastTimestamp'
+```
+
+**Common Issues**:
+- Image pull errors → Check ACR permissions
+- CrashLoopBackOff → Check application logs
+- Pending → Check node resources
+
+### Image Pull Errors
+
+```bash
+# Verify ACR integration
+az aks check-acr \
+  --resource-group microservice-app-prod-rg \
+  --name microservice-app-aks \
+  --acr microserviceappacr.azurecr.io
+
+# Recreate ACR role assignment
+az aks update \
+  --resource-group microservice-app-prod-rg \
+  --name microservice-app-aks \
+  --attach-acr microserviceappacr
+```
+
+### Application Not Accessible
+
+```bash
+# Check service status
+kubectl get svc -n production
+
+# Check if external IP is assigned
+kubectl describe svc microservice-app -n production
+
+# Check network policies
+kubectl get networkpolicy -n production
+```
+
+### High Resource Usage
+
+```bash
+# Check resource usage
+kubectl top nodes
+kubectl top pods -n production
+
+# Scale deployment manually
+kubectl scale deployment microservice-app -n production --replicas=5
+
+# Check HPA status
+kubectl get hpa -n production
+kubectl describe hpa microservice-app-hpa -n production
+```
+
+### Deployment Stuck
+
+```bash
+# Check deployment status
+kubectl rollout status deployment/microservice-app -n production
+
+# Pause rollout
+kubectl rollout pause deployment/microservice-app -n production
+
+# Resume rollout
+kubectl rollout resume deployment/microservice-app -n production
+
+# Force restart
+kubectl rollout restart deployment/microservice-app -n production
+```
+
+### View Azure Monitor Logs
+
+```bash
+# Install Azure CLI Log Analytics extension
+az extension add --name log-analytics
+
+# Query logs
+az monitor log-analytics query \
+  --workspace <WORKSPACE_ID> \
+  --analytics-query "ContainerLog | where Namespace == 'production' | take 100"
+```
+
+---
+
+## Production Checklist
+
+Before going live, ensure:
+
+- [ ] Terraform infrastructure applied successfully
+- [ ] AKS cluster is healthy (`kubectl get nodes`)
+- [ ] Application Insights configured
+- [ ] Azure Monitor alerts configured
+- [ ] Jenkins credentials configured
+- [ ] Successful test deployment
+- [ ] Health checks responding (`/health`, `/ready`)
+- [ ] External IP accessible
+- [ ] SSL/TLS configured (if needed)
+- [ ] Backup and disaster recovery plan
+- [ ] Rollback tested
+- [ ] Monitoring dashboards configured
+- [ ] On-call procedures documented
+
+---
+
+## Useful Commands Reference
+
+```bash
+# Get AKS credentials
+az aks get-credentials --resource-group microservice-app-prod-rg --name microservice-app-aks
+
+# View all resources in production namespace
+kubectl get all -n production
+
+# Port forward to test locally
+kubectl port-forward -n production svc/microservice-app 8080:80
+
+# Execute commands in pod
+kubectl exec -it -n production <POD_NAME> -- /bin/sh
+
+# View cluster info
+kubectl cluster-info
+kubectl get nodes -o wide
+
+# View Helm releases
+helm list -n production
+
+# Update Helm chart
+helm upgrade microservice-app ./helm/microservice-app -n production
+
+# Delete deployment
+helm uninstall microservice-app -n production
+```
+
+---
+
+## Additional Resources
+
+- [Azure AKS Documentation](https://docs.microsoft.com/en-us/azure/aks/)
+- [Helm Documentation](https://helm.sh/docs/)
+- [Kubernetes Best Practices](https://kubernetes.io/docs/concepts/configuration/overview/)
+- [Application Insights for Node.js](https://docs.microsoft.com/en-us/azure/azure-monitor/app/nodejs)
+- [Terraform Azure Provider](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs)
+
+---
+
+## Support
+
+For issues or questions:
+1. Check Jenkins build logs
+2. Check Kubernetes events and pod logs
+3. Review Azure Monitor and Application Insights
+4. Contact DevOps team
+
