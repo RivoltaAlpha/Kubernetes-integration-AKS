@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ServiceMonitor
+metadata:
+  name: microservice-app-monitor
+  namespace: production
+  labels:
+    app: microservice-app
+    prometheus: kube-prometheus
+spec:
+  selector:
+    matchLabels:
+      app: microservice-app
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s

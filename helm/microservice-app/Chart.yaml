@@ -1,0 +1,13 @@
+apiVersion: v2
+name: microservice-app
+description: Production-ready Helm chart for microservice application on AKS
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - microservice
+  - nodejs
+  - production
+maintainers:
+  - name: DevOps Team
+    email: devops@example.com

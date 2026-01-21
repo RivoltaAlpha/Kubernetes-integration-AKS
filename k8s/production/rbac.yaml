@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: microservice-app-sa
+  namespace: production
+  annotations:
+    azure.workload.identity/client-id: "<WORKLOAD_IDENTITY_CLIENT_ID>"  # Replace with actual client ID
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: microservice-app-role
+  namespace: production
+rules:
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: microservice-app-rolebinding
+  namespace: production
+subjects:
+- kind: ServiceAccount
+  name: microservice-app-sa
+  namespace: production
+roleRef:
+  kind: Role
+  name: microservice-app-role
+  apiGroup: rbac.authorization.k8s.io
