@@ -100,6 +100,9 @@ The init.groovy script automatically creates these credentials:
 - **Value**: Auto-generated SonarQube token
 - **Usage**: Static code analysis
 
+Go to Sysyem -> SonarQUbe servers
+Add SonarQUbe then select the Auto-generated SonarQube token
+
 ### 3. NVD API Key (Optional but HIGHLY Recommended)
 - **ID**: `nvd-api-key`
 - **Type**: Secret text
